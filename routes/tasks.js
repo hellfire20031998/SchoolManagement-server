@@ -32,10 +32,30 @@ function parsePagination(query) {
 
 router.get('/', async (req, res) => {
   try {
-    const { studentId, status } = req.query
-    const filter = {}
-    if (studentId) filter.studentId = studentId
-    if (status === 'pending' || status === 'completed') filter.status = status
+    const { studentId, status, search } = req.query
+    const andParts = []
+    if (studentId) {
+      if (!mongoose.isValidObjectId(String(studentId))) {
+        return res.status(400).json({ error: 'Invalid studentId' })
+      }
+      andParts.push({ studentId })
+    }
+    if (status === 'pending' || status === 'completed') {
+      andParts.push({ status })
+    }
+    const q = search != null ? String(search).trim() : ''
+    if (q) {
+      const escaped = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      const rx = new RegExp(escaped, 'i')
+      const studentMatches = await Student.find({ fullName: rx }).distinct('_id')
+      const orClause = [{ title: rx }, { description: rx }]
+      if (studentMatches.length > 0) {
+        orClause.push({ studentId: { $in: studentMatches } })
+      }
+      andParts.push({ $or: orClause })
+    }
+    const filter =
+      andParts.length === 0 ? {} : andParts.length === 1 ? andParts[0] : { $and: andParts }
     const { page, limit, skip } = parsePagination(req.query)
     const [tasks, total] = await Promise.all([
       Task.find(filter)
@@ -120,6 +140,7 @@ router.post('/bulk-by-class', async (req, res) => {
 })
 
 const MAX_BULK_STUDENTS = 200
+const MAX_BULK_TASK_IDS = 200
 
 /** Same task for an explicit list of students (single or batch). Must be registered before /:id */
 router.post('/bulk', async (req, res) => {
@@ -170,6 +191,60 @@ router.post('/bulk', async (req, res) => {
   }
 })
 
+router.post('/bulk-status', async (req, res) => {
+  try {
+    const { taskIds, status } = req.body
+    if (status !== 'pending' && status !== 'completed') {
+      return res.status(400).json({ error: 'status must be pending or completed' })
+    }
+    if (!Array.isArray(taskIds) || taskIds.length === 0) {
+      return res.status(400).json({ error: 'taskIds must be a non-empty array' })
+    }
+    const unique = [...new Set(taskIds.map((id) => String(id)))]
+    if (unique.length > MAX_BULK_TASK_IDS) {
+      return res.status(400).json({ error: `At most ${MAX_BULK_TASK_IDS} tasks per request` })
+    }
+    for (const id of unique) {
+      if (!mongoose.isValidObjectId(id)) {
+        return res.status(400).json({ error: 'Invalid task id in list' })
+      }
+    }
+    const now = new Date()
+    const update =
+      status === 'completed'
+        ? { $set: { status: 'completed', completedAt: now } }
+        : { $set: { status: 'pending' }, $unset: { completedAt: 1 } }
+    const result = await Task.updateMany({ _id: { $in: unique } }, update)
+    res.json({ modifiedCount: result.modifiedCount })
+  } catch (err) {
+    console.error(err)
+    res.status(500).json({ error: 'Failed to update task status' })
+  }
+})
+
+router.post('/bulk-delete', async (req, res) => {
+  try {
+    const { taskIds } = req.body
+    if (!Array.isArray(taskIds) || taskIds.length === 0) {
+      return res.status(400).json({ error: 'taskIds must be a non-empty array' })
+    }
+    const unique = [...new Set(taskIds.map((id) => String(id)))]
+    if (unique.length > MAX_BULK_TASK_IDS) {
+      return res.status(400).json({ error: `At most ${MAX_BULK_TASK_IDS} tasks per request` })
+    }
+    for (const id of unique) {
+      if (!mongoose.isValidObjectId(id)) {
+        return res.status(400).json({ error: 'Invalid task id in list' })
+      }
+    }
+    const result = await Task.deleteMany({ _id: { $in: unique } })
+    res.json({ deletedCount: result.deletedCount })
+  } catch (err) {
+    console.error(err)
+    res.status(500).json({ error: 'Failed to delete tasks' })
+  }
+})
+
 router.get('/:id', async (req, res) => {
   try {
     const task = await Task.findById(req.params.id).populate(studentPopulate).lean()
@@ -188,10 +263,10 @@ router.put('/:id', async (req, res) => {
     if (!task) return res.status(404).json({ error: 'Task not found' })
     if (title !== undefined) task.title = String(title).trim()
     if (description !== undefined) task.description = String(description)
-    if (dueDate !== undefined) task.dueDate = dueDate ? new Date(dueDate) : undefined
+    if (dueDate !== undefined) task.dueDate = dueDate ? new Date(dueDate) : null
     if (status === 'completed' || status === 'pending') {
       task.status = status
-      task.completedAt = status === 'completed' ? new Date() : undefined
+      task.completedAt = status === 'completed' ? new Date() : null
     }
     await task.save()
     const populated = await Task.findById(task._id).populate(studentPopulate).lean()
