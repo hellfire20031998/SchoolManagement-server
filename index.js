@@ -26,7 +26,16 @@ if (!process.env.MONGODB_URI) {
   process.exit(1)
 }
 
-app.use(cors({ origin: process.env.CLIENT_ORIGIN || 'http://localhost:5173' }))
+const clientOrigins = (process.env.CLIENT_ORIGIN || 'http://localhost:5173')
+  .split(',')
+  .map((o) => o.trim())
+  .filter(Boolean)
+app.use(
+  cors({
+    origin: clientOrigins.length <= 1 ? clientOrigins[0] : clientOrigins,
+    credentials: false,
+  }),
+)
 app.use(express.json())
 
 app.get('/api/health', (_req, res) => {
